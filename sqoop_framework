@@ -1,0 +1,87 @@
+set -x;
+export HIVE_CONF_DIR=/mapr/datalake/other/aes_ucee_bd_pr_1/hive/conf
+export SQOOP_CONF_DIR=/mapr/datalake/other/aes_ucee_bd_pr_1/sqoop/conf
+rtcm_db_path=/datalake/other/aes_ucee_bd_pr_1/hive/warehouse/raw_rtcm_nr.db
+test_db_path=/datalake/other/aes_ucee_bd_pr_1/hive/warehouse/user_mani.db
+table_name=$1
+fetch_size=$2
+num_mappers=$3
+hive_table_name=$table_name
+#source_table_name=""$table_name
+process_id=53
+run_date=$(date +%Y-%m-%d)
+sh log_process_info.sh CHILD_START ${process_id} "${run_date}" "pull_rtcm_tables.sh"
+
+hive_column_mappings=$(sh get_hive_mapping_for_table.sh $table_name)
+echo "Hive Column mappings for $table_name are $hive_column_mappings"
+echo "Fetch-size: " $fetch_size
+echo "Hive table import name: " $source_table_name
+echo "Deleting prexisting table path "$rtcm_db_path"/"$table_name
+starttime=$(date +"%Y-%m-%d %H:%M:%S")
+qcstatus="ACCEPTED"
+qcmessage="NA"
+database_name="RAW_RTCM_NR"
+notification_event="RTCM_WEEKLY_REFRESH"
+starttimestamp=$(date +%Y-%m-%d_%H:%M:%S)
+username=$(sh get_property.sh tenant.service.primaryaccount.id)
+pwd=$(sh get_property.sh tenant.service.primaryaccount.password)
+
+p_temp=`beeline -n $username -p $pwd -u "jdbc:hive2://********:***?mapred.job.queue.name=aes_ucee_bd_pr_1_q1;"  --hivevar hive_table_name=$hive_table_name --showHeader=false --outputformat=csv2 -e 'set hive_table_name; set hivevar:hive_table_name;set role admin;select count(*) from raw_rtcm_nr.${hivevar:hive_table_name};drop table raw_rtcm_nr.${hivevar:hive_table_name};'`
+prev=$(echo ${p_temp} | cut -d' ' -f3)
+echo "$table_name: " $prev
+prev_count=$(echo $prev | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')
+echo "$hive_table_name: " $prev_count
+
+hadoop fs -rm -r $rtcm_db_path"/"$table_name
+#hadoop fs -rm -r $test_db_path"/"$table_name
+
+echo "Pulling table $table_name"
+if ! sqoop import -Dmapred.job.queue.name=aes_ucee_bd_pr_1_q1 \
+-Dmapreduce.map.memory.mb=150000 \
+-Dmapreduce.map.java.opts=-Xmx130000m \
+-Dmapred.map.tasks.speculative.execution=false \
+--connect jdbc:mysql://dbvrp63940.uhc.com:3306/rtcm03 \
+--username="*****" \
+--password="******" \
+--target-dir /datalake/other/aes_ucee_bd_pr_1/hive/warehouse/raw_rtcm_nr.db/$table_name \
+--query="select * from(select * from rtcm03.$table_name) a where \$CONDITIONS" \
+--hive-drop-import-delims \
+--hive-import \
+--create-hive-table \
+--hive-database raw_rtcm_nr \
+--hive-table $hive_table_name \
+--fetch-size $fetch_size \
+--map-column-hive $hive_column_mappings \
+--outdir /mapr/datalake/other/aes_ucee_bd_pr_1/scripts/ingestion_jobs/weekly/rtcm/java_files \
+--m $num_mappers;then
+echo "Import has failed"
+endtimestamp=$(date +%Y-%m-%d_%H:%M:%S)
+
+cat <<EOT >> summary_report.sh
+<tr bgcolor='#f77166'><td>$hive_table_name</td><td>$starttimestamp</td><td>$endtimestamp</td><td>--</td><td>--</td><td>FAILURE</td></tr>
+EOT
+#capturing runtime metadata
+end_date=$(date +%Y-%m-%d)
+process_id=53
+qcstatus=REJECTED
+sh log_process_info.sh CHILD_COMPLETED ${process_id} "${end_date}" "pull_rtcm_tables.sh" "${qcstatus}" "FAILED"
+sh log_process_info.sh COMPLETED ${process_id} "${end_date}" "${qcstatus}" "FAILED"
+
+else
+echo "Import was successfully completed"
+
+finishtime=$(date +"%Y-%m-%d %H:%M:%S")
+ingestion_date=$(date +"%Y-%m-%d")
+echo "Log_instion_result utility triggering"
+sh /mapr/datalake/other/aes_ucee_bd_pr_1/scripts/utils/ingestionresult/log_ingestion_result.sh RAW_RTCM_NR $table_name  $ingestion_date -1 -1 "$starttime" "$finishtime" $qcstatus "$qcmessage" $notification_event
+endtimestamp=$(date +%Y-%m-%d_%H:%M:%S)
+c_temp=`beeline -n $username -p $pwd -u "jdbc:hive2://apvrp60202.uhc.com:10654?mapred.job.queue.name=aes_ucee_bd_pr_1_q1;" --hivevar hive_table_name=$hive_table_name --showHeader=false --outputformat=csv2 -e 'set role admin;select count(*) from raw_rtcm_nr.${hivevar:hive_table_name};'`
+curr=$(echo ${c_temp} | cut -d' ' -f3)
+echo "$table_name: " $curr
+curr_count=$(echo $curr | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')
+echo "$hive_table_name :" $curr_count
+cat <<EOT >> summary_report.sh
+<tr><td>$hive_table_name</td><td>$starttimestamp</td><td>$endtimestamp</td><td>$prev_count</td><td>$curr_count</td><td>SUCCESS</td></tr>
+EOT
+
+fi
